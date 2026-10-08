@@ -38,3 +38,11 @@ foreach(testFile ${testFiles})
 
     add_dependencies(check "${testFilename}")
 endforeach()
+
+if (GUI AND APPLE)
+    find_package(Qt6 REQUIRED COMPONENTS Widgets)
+    add_executable(testmacaccessibility testmacaccessibility.mm ../src/gui/macosaccessibility.mm)
+    target_link_libraries(testmacaccessibility PRIVATE Qt::Test Qt::Widgets "-framework Cocoa")
+    add_test(NAME testmacaccessibility COMMAND testmacaccessibility)
+    add_dependencies(check testmacaccessibility)
+endif()
