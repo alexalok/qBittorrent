@@ -98,6 +98,9 @@
 #ifndef DISABLE_GUI
 #include "gui/desktopintegration.h"
 #include "gui/mainwindow.h"
+#ifdef Q_OS_MACOS
+#include "gui/macosaccessibility.h"
+#endif
 #include "gui/shutdownconfirmdialog.h"
 #include "gui/uithememanager.h"
 #include "gui/windowstate.h"
@@ -314,6 +317,10 @@ Application::Application(int &argc, char **argv)
     , m_storeNotificationTorrentAdded(NOTIFICATIONS_SETTINGS_KEY(u"TorrentAdded"_s))
 #endif
 {
+#if defined(Q_OS_MACOS) && !defined(DISABLE_GUI)
+    MacUtils::initializeAccessibilityWorkaround();
+#endif
+
     qRegisterMetaType<Log::Msg>("Log::Msg");
     qRegisterMetaType<Log::Peer>("Log::Peer");
 
