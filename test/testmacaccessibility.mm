@@ -49,6 +49,15 @@ class TestMacAccessibility final : public QObject
 private slots:
     void initTestCase() const
     {
+        const Class cls = NSClassFromString(@"QMacAccessibilityElement");
+        if (!cls
+            || ![cls respondsToSelector:sel_registerName("elementWithId:")]
+            || ![cls respondsToSelector:sel_registerName("removeElementsFromCache:")]
+            || ![cls instancesRespondToSelector:@selector(accessibilitySelectedChildren)])
+        {
+            QSKIP("Qt Cocoa accessibility bridge does not support these native regressions");
+        }
+
         MacUtils::initializeAccessibilityWorkaround();
         MacUtils::initializeAccessibilityWorkaround();
     }
