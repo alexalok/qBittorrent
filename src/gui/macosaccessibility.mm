@@ -29,6 +29,7 @@
 #include "macosaccessibility.h"
 
 #import <Foundation/Foundation.h>
+#include <dlfcn.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
 
@@ -41,8 +42,10 @@
 namespace
 {
     IMP originalDealloc = nullptr;
-    IMP originalRemoveElements = nullptr;
     ptrdiff_t accessibleIdOffset = 0;
+    void *(*accessibleCacheInstance)() = nullptr;
+    id (*cachedElementForId)(void *, QAccessible::Id) = nullptr;
+    void (*removeCachedElement)(void *, QAccessible::Id) = nullptr;
 
     Method findOwnMethod(Class cls, SEL selector)
     {
@@ -61,42 +64,49 @@ namespace
         return result;
     }
 
-    bool isSyntheticElement(id element)
-    {
-        return reinterpret_cast<BOOL (*)(id, SEL)>(objc_msgSend)(
-            element, sel_registerName("isManagedByParent"));
-    }
-
     void deallocElement(id element, SEL selector)
     {
-        // Qt's synthetic rows, columns and unresolved cells borrow the table's
-        // accessibility ID. They must not delete its interface when released.
-        if (isSyntheticElement(element))
-        {
-            auto *accessibleId = reinterpret_cast<QAccessible::Id *>(
-                reinterpret_cast<char *>(element) + accessibleIdOffset);
-            *accessibleId = 0;
-        }
+        // Native elements borrow their interfaces from Qt. This also applies to
+        // real cells: QAccessibleTable keeps their IDs until the model removes
+        // them. Releasing a native representation must not delete the interface.
+        auto *accessibleId = reinterpret_cast<QAccessible::Id *>(
+            reinterpret_cast<char *>(element) + accessibleIdOffset);
+        *accessibleId = 0;
         reinterpret_cast<void (*)(id, SEL)>(originalDealloc)(element, selector);
     }
 
-    void removeElementsFromCache(id cls, SEL selector, NSArray *elements)
+    void removeElementsFromCache(id, SEL, NSArray *elements)
     {
-        NSMutableArray *ownedElements = [NSMutableArray arrayWithCapacity:elements.count];
-        for (id element in elements)
+        // Invalidation posts native notifications that can reenter the bridge.
+        for (id element in [[elements copy] autorelease])
         {
-            if (!isSyntheticElement(element))
-                [ownedElements addObject:element];
+            if (reinterpret_cast<BOOL (*)(id, SEL)>(objc_msgSend)(
+                    element, sel_registerName("isManagedByParent")))
+            {
+                continue;
+            }
+
+            const auto accessibleId = *reinterpret_cast<const QAccessible::Id *>(
+                reinterpret_cast<const char *>(element) + accessibleIdOffset);
+            if (!accessibleId)
+                continue;
+
+            void *cache = accessibleCacheInstance();
+            if (cachedElementForId(cache, accessibleId) == element)
+            {
+                // Drop the native representation, whose row/column can be stale,
+                // but leave the interface owned by QAccessibleTable alive.
+                removeCachedElement(cache, accessibleId);
+            }
         }
-        reinterpret_cast<void (*)(id, SEL, NSArray *)>(originalRemoveElements)(cls, selector, ownedElements);
     }
 }
 
 void MacUtils::initializeAccessibilityWorkaround()
 {
-    // Qt's Cocoa bridge deletes borrowed IDs during native table-cell replacement.
-    // This frees selectedItems() entries while accessibilitySelectedChildren is
-    // still iterating them. Only patch when the private runtime layout matches:
+    // Qt's Cocoa bridge deletes borrowed IDs during native table-cell replacement
+    // and row/column cleanup. This invalidates selectedItems() and the table's
+    // child cache. Only patch when the private runtime layout matches:
     // every patched method must be defined by QMacAccessibilityElement itself.
     if (originalDealloc)
         return;
@@ -120,7 +130,21 @@ void MacUtils::initializeAccessibilityWorkaround()
         return;
     }
 
+    // Resolve Qt's private native-cache operations without adding a load-time
+    // dependency. Refuse the workaround if this Qt build has a different ABI.
+    accessibleCacheInstance = reinterpret_cast<decltype(accessibleCacheInstance)>(
+        dlsym(RTLD_DEFAULT, "_ZN16QAccessibleCache8instanceEv"));
+    cachedElementForId = reinterpret_cast<decltype(cachedElementForId)>(
+        dlsym(RTLD_DEFAULT, "_ZNK16QAccessibleCache12elementForIdEj"));
+    removeCachedElement = reinterpret_cast<decltype(removeCachedElement)>(
+        dlsym(RTLD_DEFAULT, "_ZN16QAccessibleCache23removeAccessibleElementEj"));
+    if (!accessibleCacheInstance || !cachedElementForId || !removeCachedElement)
+    {
+        qWarning("Cannot resolve Qt Cocoa accessibility native-cache operations");
+        return;
+    }
+
     accessibleIdOffset = ivar_getOffset(accessibleId);
     originalDealloc = method_setImplementation(dealloc, reinterpret_cast<IMP>(deallocElement));
-    originalRemoveElements = method_setImplementation(removeElements, reinterpret_cast<IMP>(removeElementsFromCache));
+    method_setImplementation(removeElements, reinterpret_cast<IMP>(removeElementsFromCache));
 }
